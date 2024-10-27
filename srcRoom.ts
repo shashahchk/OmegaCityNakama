@@ -14,10 +14,10 @@ function isRoom(obj: any): obj is Room {
 /**
  * Get the stream ID of a room.
  */
-function getRoomStreamId(room: Room): nkruntime.Stream {
+function getRoomStreamId(roomName: string): nkruntime.Stream {
   return {
-    mode: 205,
-    label: room.roomName,
+    mode: 2,
+    label: roomName,
   };
 }
 
@@ -36,7 +36,7 @@ function rpcJoinRoomStreamAsOnline(
     return JSON.stringify({ error: "Invalid room format" });
   }
   const room = json as Room;
-  const roomStreamId = getRoomStreamId(room);
+  const roomStreamId = getRoomStreamId(room.roomName);
 
   const hidden: boolean = false;
   const persistence: boolean = true;
@@ -72,7 +72,7 @@ function rpcJoinRoomStreamAsOffline(
     return JSON.stringify({ error: "Invalid room format" });
   }
   const room = json as Room;
-  const roomStreamId = getRoomStreamId(room);
+  const roomStreamId = getRoomStreamId(room.roomName);
 
   const hidden: boolean = true;
   const persistence: boolean = true;
@@ -101,7 +101,7 @@ function rpcGetOnlineUsersInRoom(
     return JSON.stringify({ error: "Invalid room format" });
   }
   const room = json as Room;
-  const roomStreamId = getRoomStreamId(room);
+  const roomStreamId = getRoomStreamId(room.roomName);
   // Acts as hashmap that checks if a user is online
   const roomOnlineUserIds: { [key: string]: { id: string; username: string } } =
     {};
@@ -119,25 +119,61 @@ function rpcGetOnlineUsersInRoom(
 }
 
 function rpcCountRoomOnlineUsers(
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  payload: string
+): string {
+  let json;
+  try {
+    json = JSON.parse(payload);
+  } catch (e) {
+    return JSON.stringify({ status: "error", message: "Invalid JSON format" });
+  }
+
+  if (!isRoom(json)) {
+    return JSON.stringify({ status: "error", message: "Invalid room format" });
+  }
+
+  const room = json as Room;
+  const roomStreamId = getRoomStreamId(room.roomName);
+  const count = nk.streamCount(roomStreamId);
+  return JSON.stringify({
+    status: "success",
+    count,
+  });
+}
+
+const ROOMS_COLLECTION = "rooms";
+
+const afterChannelLeave: nkruntime.RtAfterHookFunction<nkruntime.EnvelopeChannelLeave> =
+  function (
     ctx: nkruntime.Context,
     logger: nkruntime.Logger,
     nk: nkruntime.Nakama,
-    payload: string
-  ): string {
-    let json;
-    try {
-      json = JSON.parse(payload);
-    } catch (e) {
-      return JSON.stringify({ status: "error", message: "Invalid JSON format" });
+    output: nkruntime.EnvelopeChannelLeave | null,
+    input: nkruntime.EnvelopeChannelLeave
+  ) {
+    const streamId = getRoomStreamId(input.channelLeave.channelId);
+
+    if (nk.streamCount(streamId) === 0) {
+      logger.info(`deleting room`);
+
+      nk.storageDelete([
+        {
+          userId: ctx.userId,
+          key: input.channelLeave.channelId,
+          collection: ROOMS_COLLECTION,
+        },
+      ]);
+      return;
     }
-  
-    if (!isRoom(json)) {
-      return JSON.stringify({ status: "error", message: "Invalid room format" });
-    }
-  
-    const room = json as Room;
-    const roomStreamId = getRoomStreamId(room);
-    const presences = nk.streamUserList(roomStreamId, false);
-    logger.info("count room online users", presences.length.toString());
-    return JSON.stringify({ status: "success", count: presences.length.toString() });
-  }
+
+    nk.channelMessageSend(
+      input.channelLeave.channelId,
+      { message: `${ctx.userId} left the channel.` },
+      undefined,
+      undefined,
+      true
+    );
+  };
